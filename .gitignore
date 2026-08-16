@@ -1,0 +1,20 @@
+# PlatformIO build output
+.pio/
+.vscode/
+.idea/
+
+# ESP-IDF generated config (keep only the defaults template)
+sdkconfig
+sdkconfig.old
+sdkconfig.*.old
+sdkconfig.wroom_lowmem_idf
+sdkconfig.esp32dev
+
+# Firmware binaries
+*.bin
+*.elf
+*.hex
+
+# OS / editor
+.DS_Store
+Thumbs.db
