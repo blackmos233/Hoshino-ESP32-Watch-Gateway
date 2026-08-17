@@ -176,3 +176,16 @@ ESP32
 
 本项目仅用于**个人学习与设备互联研究**。使用前请确认你拥有相关设备，
 并遵守设备制造商的服务条款与当地法律法规。作者不对任何误用、设备损坏或法律后果负责。
+
+---
+
+## References & Acknowledgements
+
+本项目的 Xiaomi MiWear / Vela 穿戴设备通信协议研究过程中，
+参考并交叉验证了以下社区开源项目及公开资料：
+
+- AstroBox-NG — AstralSightStudios
+- AstroBox-Public — AstralSightStudios
+
+Hoshino 的 ESP32 固件实现基于对设备通信行为、抓包及公开协议实现的研究。
+第三方代码及组件的许可证以对应源码目录中的声明为准。
