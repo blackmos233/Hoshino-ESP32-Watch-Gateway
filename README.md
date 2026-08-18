@@ -5,7 +5,7 @@
 - 手表通过蓝牙 SPP 连接 ESP32；
 - ESP32 在内部架起一块虚拟网卡，为手表提供 DHCP（`10.1.10.2/24`）；
 - 手表的 IPv4 流量经 lwIP NAPT 转发到家庭 Wi-Fi，实现真实联网；
-- 语音经 Opus 解码后交给 MiMo ASR，再把识别文字回填到手表原生 XiaoAI 界面。
+- 配网页面提供家庭 Wi-Fi 与附近经典蓝牙设备扫描，手动填写 AuthKey 后完成配置。
 
 本仓库只包含**固件源码**。私有协议的逆向过程与抓包数据不在此公开。
 
@@ -13,12 +13,11 @@
 
 ## 功能特性
 
-- **首次配网**：无任何配置时自动开启 `Hoshino-Bridge` 热点，手机连上后在网页里填写 Wi-Fi 与手表参数。
-- **网页配置**：内置 Web 控制台（配网 + 状态 + 启动/停止 + 对话上下文管理）。
+- **首次配网**：无任何配置时自动开启 `Vela-Bridge` 热点，手机连上后扫描并选择 Wi-Fi 与手表。
+- **网页配置**：内置最小配网页面：Wi-Fi、经典蓝牙设备选择、AuthKey 与热点密码。
 - **网络桥（NAPT）**：手表 `ch7` 原始 IPv4 → 虚拟网卡 → lwIP NAPT → 家庭 Wi-Fi → 互联网，支持 DNS/TCP/HTTP/TLS。
-- **XiaoAI 语音**：`ch3` Opus 流 → 滚动 ASR → 原生 transcript 回填。
-- **多轮上下文**：MiMo Chat 保留最近 3 轮 `user/assistant` 对话，空闲自动清空。
-- **IO 短接重新配网**：短接两个 GPIO 约 2 秒，自动重启进入配网模式。
+- **蓝牙扫描**：扫描附近 Bluetooth Classic 设备，点击结果自动填入 MAC；不会自动配对或连接。
+- **BOOT 长按重新配网**：正常运行后长按 BOOT 约 2 秒，自动重启进入配网模式。
 
 ---
 
@@ -28,11 +27,10 @@
 |----|------|
 | 芯片 | ESP32（经典双核，如 ESP32-WROOM-32 / 32E / DevKit） |
 | 蓝牙 | **必须支持 Bluetooth Classic SPP**（ESP32-C3 等 BLE-only 芯片不适用） |
-| Flash | ≥ 2 MB（默认使用 `bare_minimum_2MB.csv` 分区表） |
+| Flash | 4 MB（使用 `huge_app.csv` 分区表） |
 | 串口 | 波特率 2000000 |
 
-> 建议内存：项目已针对 2 MB Flash / 无 PSRAM 的 WROOM 做了内存优化，
-> 桥接稳定态空闲堆约 60~90 KB。若后续要跑更重的语音/TLS，可换 WROVER（8 MB PSRAM）。
+> 已验证目标为 4 MB、无 PSRAM 的 ESP32-WROOM；当前发布构建使用低内存 ESP-IDF 配置。
 
 ---
 
@@ -41,18 +39,18 @@
 - [PlatformIO](https://platformio.org/)（推荐 VS Code 插件）
 - `framework = espidf, arduino`（ESP-IDF 4.4.x + Arduino 作为组件）
 - [bblanchon/ArduinoJson](https://github.com/bblanchon/ArduinoJson) ^7
-- [sh123/esp32_opus](https://github.com/sh123/esp32_opus)（Opus 解码；发布前请自行复核其许可证）
+- [olikraus/U8g2](https://github.com/olikraus/u8g2) ^2.36
 
 ---
 
 ## 编译与烧录
 
 ```bash
-# 编译（低内存 ESP-IDF 环境）
-pio run -e wroom_lowmem_idf
+# 编译（4 MB WROOM 低内存 ESP-IDF 环境）
+pio run -e upesy_wroom_lowmem_idf
 
 # 烧录
-pio run -e wroom_lowmem_idf -t upload
+pio run -e upesy_wroom_lowmem_idf -t upload
 
 # 串口监视
 pio device monitor -b 2000000
@@ -64,15 +62,11 @@ pio device monitor -b 2000000
 
 ## 首次配网
 
-1. 烧录后（无任何配置时），ESP32 自动开启热点 **`Hoshino-Bridge`**。
+1. 烧录后（无任何配置时），ESP32 自动开启热点 **`Vela-Bridge`**。
 2. 默认 AP 密码：**`hoshino-setup`**（第一次保存配置时建议改成你自己的）。
 3. 手机/电脑连接该热点。
 4. 浏览器打开 **`http://192.168.4.1/`**（连上热点后通常会自动弹出）。
-5. 填写：
-   - 家庭 Wi-Fi SSID / 密码；
-   - Watch MAC（形如 `AA:BB:CC:DD:EE:FF`）；
-   - Watch Auth Key（32 位 hex，需自行从官方设备/抓包获取，仓库不含任何密钥）；
-   - （可选）MiMo Base URL / API Key / 模型 / 本地 Token / CA 证书。
+5. 扫描并选择家庭 Wi-Fi；扫描并选择附近的经典蓝牙设备；填写对应手表的 AuthKey（32 位 hex，仓库不含任何密钥）。
 6. 保存 → ESP32 自动重启 → 连家庭 Wi-Fi 并自动连接手表。
 
 ---
@@ -91,12 +85,14 @@ pio device monitor -b 2000000
 
 ---
 
-## 重新配网（IO 短接）
+## 重新配网（BOOT 长按）
 
 需要重新进入配网模式时：
 
-- **短接 `GPIO16` 与 `GPIO17`**（板子上丝印 `D16` / `D17`）约 **2 秒**；
+- 在设备正常运行后，**长按 `BOOT` 键约 2 秒**；
 - ESP32 写入标志并**重启**，重启后直接进入配网热点模式。
+
+> 不要在上电瞬间按住 BOOT，否则 ESP32 会进入下载模式。
 
 也可通过串口命令触发：
 
@@ -128,6 +124,8 @@ GET  /api/v1/models
 POST /setup          # 保存配置（含 Wi-Fi / 手表参数）
 GET  /setup/status
 GET  /setup/trace
+GET  /setup/wifi/scan?start=1
+GET  /setup/bluetooth/scan?start=1
 ```
 
 ---
@@ -156,7 +154,7 @@ ESP32
    ├─ lwIP NAPT（IP 转发 + 源地址改写）
    │
    ├─ ch7 原始 IPv4 ──► NAPT ──► 家庭 Wi-Fi ──► 互联网
-   └─ ch3 Opus ──► 解码 ──► MiMo ASR ──► 原生 XiaoAI 回填
+   └─ 配网页面 ──► Wi-Fi / Bluetooth Classic 扫描 ──► AuthKey 配置
 ```
 
 > 注：本仓库未包含协议逆向抓包数据。若你需要在此基础上继续扩展，
