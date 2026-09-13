@@ -335,15 +335,10 @@ ip4_forward(struct pbuf *p, struct ip_hdr *iphdr, struct netif *inp)
 {
   struct netif *netif;
 
-  printf("IP4_FWD_ENTER src=%"U16_F".%"U16_F".%"U16_F".%"U16_F" dst=%"U16_F".%"U16_F".%"U16_F".%"U16_F" inp=%c%c\n",
-         ip4_addr1(&iphdr->src), ip4_addr2(&iphdr->src), ip4_addr3(&iphdr->src), ip4_addr4(&iphdr->src),
-         ip4_addr1(&iphdr->dest), ip4_addr2(&iphdr->dest), ip4_addr3(&iphdr->dest), ip4_addr4(&iphdr->dest),
-         inp->name[0], inp->name[1]);
-
   PERF_START;
   LWIP_UNUSED_ARG(inp);
 
-  if (!ip4_canforward(p)) {
+  if (ip4_addr_ismulticast(ip4_current_dest_addr()) || !ip4_canforward(p)) {
     goto return_noroute;
   }
 
@@ -372,8 +367,6 @@ ip4_forward(struct pbuf *p, struct ip_hdr *iphdr, struct netif *inp)
     printf("\n");
     goto return_noroute;
   }
-  printf("IP4_FWD_ROUTE_OK netif=%c%c up=%u link=%u\n", netif->name[0], netif->name[1],
-         netif_is_up(netif) ? 1u : 0u, netif_is_link_up(netif) ? 1u : 0u);
 #if !IP_FORWARD_ALLOW_TX_ON_RX_NETIF
   /* Do not forward packets onto the same network interface on which
    * they arrived. */
@@ -732,13 +725,10 @@ ip4_input(struct pbuf *p, struct netif *inp)
     /* packet not for us, route or discard */
     LWIP_DEBUGF(IP_DEBUG | LWIP_DBG_TRACE, ("ip4_input: packet not for us.\n"));
 #if IP_FORWARD
-    /* non-broadcast packet? */
-    if (!ip4_addr_isbroadcast(ip4_current_dest_addr(), inp)) {
+    /* non-broadcast and non-multicast packet? */
+    if (!ip4_addr_isbroadcast(ip4_current_dest_addr(), inp) &&
+        !ip4_addr_ismulticast(ip4_current_dest_addr())) {
       /* try to forward IP packet on (other) interfaces */
-      printf("IP4_INPUT_NOT_FOR_US src=%"U16_F".%"U16_F".%"U16_F".%"U16_F" dst=%"U16_F".%"U16_F".%"U16_F".%"U16_F" inp=%c%c IP_FORWARD=1\n",
-             ip4_addr1(&iphdr->src), ip4_addr2(&iphdr->src), ip4_addr3(&iphdr->src), ip4_addr4(&iphdr->src),
-             ip4_addr1(&iphdr->dest), ip4_addr2(&iphdr->dest), ip4_addr3(&iphdr->dest), ip4_addr4(&iphdr->dest),
-             inp->name[0], inp->name[1]);
       ip4_forward(p, (struct ip_hdr *)p->payload, inp);
     } else
 #endif /* IP_FORWARD */

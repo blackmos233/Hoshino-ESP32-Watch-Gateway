@@ -689,12 +689,7 @@ ip_napt_recv(struct pbuf *p, struct ip_hdr *iphdr)
   struct ip_portmap_entry *m;
   struct ip_napt_entry *t;
 
-  printf("NAPT_RECV_ENTER src=%"U16_F".%"U16_F".%"U16_F".%"U16_F" dst=%"U16_F".%"U16_F".%"U16_F".%"U16_F" proto=%u\n",
-         ip4_addr1(&iphdr->src), ip4_addr2(&iphdr->src), ip4_addr3(&iphdr->src), ip4_addr4(&iphdr->src),
-         ip4_addr1(&iphdr->dest), ip4_addr2(&iphdr->dest), ip4_addr3(&iphdr->dest), ip4_addr4(&iphdr->dest),
-         (unsigned)IPH_PROTO(iphdr));
-
-  if (ip_napt_max == 0) { printf("NAPT_RECV_SKIP table_empty\n"); return; }
+  if (ip_napt_max == 0) { return; }
 
 #if LWIP_ICMP
   /* NAPT for ICMP Echo Request using identifier */
@@ -792,13 +787,7 @@ ip_napt_recv(struct pbuf *p, struct ip_hdr *iphdr)
 err_t
 ip_napt_forward(struct pbuf *p, struct ip_hdr *iphdr, struct netif *inp, struct netif *outp)
 {
-  printf("NAPT_FWD_ENTER inp_napt=%d src=%"U16_F".%"U16_F".%"U16_F".%"U16_F" dst=%"U16_F".%"U16_F".%"U16_F".%"U16_F" proto=%u\n",
-         hoshino_napt_netif_enabled(inp) ? 1 : 0,
-         ip4_addr1(&iphdr->src), ip4_addr2(&iphdr->src), ip4_addr3(&iphdr->src), ip4_addr4(&iphdr->src),
-         ip4_addr1(&iphdr->dest), ip4_addr2(&iphdr->dest), ip4_addr3(&iphdr->dest), ip4_addr4(&iphdr->dest),
-         (unsigned)IPH_PROTO(iphdr));
   if (!hoshino_napt_netif_enabled(inp)) {
-    printf("NAPT_FWD_SKIP inp_not_napt\n");
     return ERR_OK;
   }
 
@@ -917,13 +906,6 @@ ip_napt_forward(struct pbuf *p, struct ip_hdr *iphdr, struct netif *inp, struct 
       ip_napt_modify_port_udp(udphdr, 0, mport);
     ip_napt_modify_addr_udp(udphdr, &iphdr->src, ip_2_ip4(&outp->ip_addr)->addr);
     ip_napt_modify_addr(iphdr, &iphdr->src, ip_2_ip4(&outp->ip_addr)->addr);
-    printf("NAPT_MODIFY_SRC new_src=%"U16_F".%"U16_F".%"U16_F".%"U16_F":%u dst=%"U16_F".%"U16_F".%"U16_F".%"U16_F" ip_chksum=0x%04x udp_chksum=0x%04x ttl=%u\n",
-           ip4_addr1(&iphdr->src), ip4_addr2(&iphdr->src), ip4_addr3(&iphdr->src), ip4_addr4(&iphdr->src),
-           (unsigned)PP_NTOHS(udphdr->src),
-           ip4_addr1(&iphdr->dest), ip4_addr2(&iphdr->dest), ip4_addr3(&iphdr->dest), ip4_addr4(&iphdr->dest),
-           (unsigned)PP_NTOHS(IPH_CHKSUM(iphdr)),
-           (unsigned)PP_NTOHS(udphdr->chksum),
-           (unsigned)IPH_TTL(iphdr));
     return ERR_OK;
   }
 #endif

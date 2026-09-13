@@ -371,6 +371,40 @@ int resolveWatchSppChannel(uint8_t address[6], const char* purpose) {
   return kWatchObservedSppChannel;
 }
 
+namespace {
+constexpr uint16_t kBtmHciEnableMasterSlaveSwitch = 0x0001;
+constexpr uint8_t kBtmPmSetOnlyId = 0x80;
+constexpr uint8_t kBtmPmModeActive = 0x00;
+
+struct BtmPmPowerMode {
+  uint16_t max;
+  uint16_t min;
+  uint16_t attempt;
+  uint16_t timeout;
+  uint8_t mode;
+};
+}
+
+extern "C" {
+void BTM_SetDefaultLinkPolicy(uint16_t settings);
+uint8_t BTM_SetLinkPolicy(uint8_t* remote_bda, uint16_t* settings);
+uint8_t BTM_SetPowerMode(uint8_t pm_id, uint8_t* remote_bda, struct BtmPmPowerMode* p_mode);
+void bta_dm_pm_active(uint8_t* peer_addr);
+}
+
+void enforceActiveBluetoothLinkPolicy(const uint8_t* bda = nullptr) {
+  BTM_SetDefaultLinkPolicy(kBtmHciEnableMasterSlaveSwitch);
+  if (bda != nullptr) {
+    uint16_t policy = kBtmHciEnableMasterSlaveSwitch;
+    BTM_SetLinkPolicy(const_cast<uint8_t*>(bda), &policy);
+    bta_dm_pm_active(const_cast<uint8_t*>(bda));
+    BtmPmPowerMode pm_mode;
+    memset(&pm_mode, 0, sizeof(pm_mode));
+    pm_mode.mode = kBtmPmModeActive;
+    BTM_SetPowerMode(kBtmPmSetOnlyId, const_cast<uint8_t*>(bda), &pm_mode);
+  }
+}
+
 bool connectWatchWithSdp(uint8_t address[6], const char* purpose) {
   const int resolved = resolveWatchSppChannel(address, purpose);
   int candidates[3] = {resolved, kWatchObservedSppChannel, 0};
@@ -390,6 +424,7 @@ bool connectWatchWithSdp(uint8_t address[6], const char* purpose) {
                   candidate == resolved ? gWatchSdpSource :
                   (candidate == kWatchObservedSppChannel ? "fallback5" : "arduino_auto"));
     if (watchBt.connect(address, candidate, ESP_SPP_SEC_NONE, ESP_SPP_ROLE_MASTER)) {
+      enforceActiveBluetoothLinkPolicy(address);
       if (candidate > 0) {
         gWatchResolvedSppChannel = candidate;
         gWatchSdpResolvedMs = millis();
@@ -721,16 +756,14 @@ static uint8_t* gRawCommandPayloadScratch = nullptr;
 static bool gWatchRawTraceEnabled = false;
 constexpr size_t kWatchNetworkMtu = 1520; // Official round-3 trace carries IPv4 packets up to 1518 B.
 constexpr size_t kWatchNetworkPacketMax = 1600;
-constexpr UBaseType_t kWatchNetworkTxQueueDepth = 4;
+constexpr UBaseType_t kWatchNetworkTxQueueDepth = 16;
 struct WatchNetworkPacket {
   uint16_t length = 0;
-  uint8_t bytes[kWatchNetworkPacketMax]{};
+  uint8_t bytes[1];
 };
 static struct netif* gWatchNetworkNetif = nullptr;
 static QueueHandle_t gWatchNetworkTxQueue = nullptr;
 static SemaphoreHandle_t gWatchNetworkInitDone = nullptr;
-static WatchNetworkPacket* gWatchNetworkTxEnqueueScratch = nullptr;
-static WatchNetworkPacket* gWatchNetworkTxDrainScratch = nullptr;
 static bool gWatchNetworkReady = false;
 static volatile uint32_t gWatchNetworkRxPackets = 0;
 static volatile uint32_t gWatchNetworkTxPackets = 0;
@@ -1236,24 +1269,31 @@ bool writeSppV2Frame(uint8_t type, uint8_t sequence, const uint8_t* payload, siz
 }
 
 err_t watchNetworkOutput(struct netif*, struct pbuf* packet, const ip4_addr_t*) {
-  if (!gWatchNetworkTxQueue || !gWatchNetworkTxEnqueueScratch || !packet ||
+  if (!gWatchNetworkTxQueue || !packet ||
       packet->tot_len == 0 || packet->tot_len > kWatchNetworkPacketMax) {
     ++gWatchNetworkDroppedPackets;
-    Serial.printf("WATCH_RETURN_DROP stage=invalid len=%u\n", static_cast<unsigned>(packet ? packet->tot_len : 0));
     return ERR_BUF;
   }
-  // Return-path tracer: this callback means the response reached the watch netif
-  // (internet -> WiFi STA -> NAPT reverse -> watch netif).
-  Serial.printf("WATCH_RETURN_FROM_LWIP len=%u\n", static_cast<unsigned>(packet->tot_len));
-  gWatchNetworkTxEnqueueScratch->length = static_cast<uint16_t>(packet->tot_len);
-  if (pbuf_copy_partial(packet, gWatchNetworkTxEnqueueScratch->bytes, packet->tot_len, 0) != packet->tot_len ||
-      xQueueSend(gWatchNetworkTxQueue, gWatchNetworkTxEnqueueScratch, 0) != pdTRUE) {
+  if (uxQueueMessagesWaiting(gWatchNetworkTxQueue) >= kWatchNetworkTxQueueDepth) {
+    ++gWatchNetworkDroppedPackets;
+    Serial.printf("WATCH_RETURN_DROP stage=queue_full len=%u\n", static_cast<unsigned>(packet->tot_len));
+    return ERR_BUF;
+  }
+  WatchNetworkPacket* pkt = static_cast<WatchNetworkPacket*>(malloc(sizeof(WatchNetworkPacket) + packet->tot_len));
+  if (!pkt) {
+    ++gWatchNetworkDroppedPackets;
+    Serial.printf("WATCH_RETURN_DROP stage=oom len=%u\n", static_cast<unsigned>(packet->tot_len));
+    return ERR_MEM;
+  }
+  pkt->length = static_cast<uint16_t>(packet->tot_len);
+  if (pbuf_copy_partial(packet, pkt->bytes, packet->tot_len, 0) != packet->tot_len ||
+      xQueueSend(gWatchNetworkTxQueue, &pkt, 0) != pdTRUE) {
+    free(pkt);
     ++gWatchNetworkDroppedPackets;
     Serial.printf("WATCH_RETURN_DROP stage=queue_full len=%u\n", static_cast<unsigned>(packet->tot_len));
     return ERR_BUF;
   }
   ++gWatchNetworkTxPackets;
-  Serial.printf("WATCH_RETURN_ENQUEUED len=%u\n", static_cast<unsigned>(packet->tot_len));
   return ERR_OK;
 }
 
@@ -1413,14 +1453,12 @@ bool setupWatchNetworkProxy() {
   gWatchInternetRouteRepairPending = false;
   if (gWatchNetworkReady) return true;
   if (!gWatchNetworkNetif) gWatchNetworkNetif = static_cast<struct netif*>(calloc(1, sizeof(struct netif)));
-  if (!gWatchNetworkTxEnqueueScratch) gWatchNetworkTxEnqueueScratch = static_cast<WatchNetworkPacket*>(calloc(1, sizeof(WatchNetworkPacket)));
-  if (!gWatchNetworkTxDrainScratch) gWatchNetworkTxDrainScratch = static_cast<WatchNetworkPacket*>(calloc(1, sizeof(WatchNetworkPacket)));
-  if (!gWatchNetworkNetif || !gWatchNetworkTxEnqueueScratch || !gWatchNetworkTxDrainScratch) {
+  if (!gWatchNetworkNetif) {
     Serial.println("WATCH_NETWORK_PROXY_INIT_FAILED stage=buffers");
     return false;
   }
   if (!gWatchNetworkTxQueue) {
-    gWatchNetworkTxQueue = xQueueCreate(kWatchNetworkTxQueueDepth, sizeof(WatchNetworkPacket));
+    gWatchNetworkTxQueue = xQueueCreate(kWatchNetworkTxQueueDepth, sizeof(WatchNetworkPacket*));
   }
   if (!gWatchNetworkTxQueue) {
     Serial.println("WATCH_NETWORK_PROXY_INIT_FAILED stage=queue");
@@ -1446,7 +1484,11 @@ bool setupWatchNetworkProxy() {
 }
 
 void resetWatchNetworkSessionQueue() {
-  if (gWatchNetworkTxQueue) xQueueReset(gWatchNetworkTxQueue);
+  if (!gWatchNetworkTxQueue) return;
+  WatchNetworkPacket* pkt = nullptr;
+  while (xQueueReceive(gWatchNetworkTxQueue, &pkt, 0) == pdTRUE) {
+    if (pkt) free(pkt);
+  }
 }
 
 bool injectWatchNetworkPacket(const uint8_t* bytes, size_t length) {
@@ -1494,27 +1536,33 @@ bool injectWatchNetworkPacket(const uint8_t* bytes, size_t length) {
 
 void drainWatchNetworkTx(uint8_t& sequence) {
   if (!gWatchNetworkTxQueue || !watchBt.connected()) return;
-  if (!gWatchNetworkTxDrainScratch) return;
   if (!ensureScratchBuffers()) return;
-  while (xQueueReceive(gWatchNetworkTxQueue, gWatchNetworkTxDrainScratch, 0) == pdTRUE) {
+  WatchNetworkPacket* pkt = nullptr;
+  while (xQueueReceive(gWatchNetworkTxQueue, &pkt, 0) == pdTRUE) {
+    if (!pkt) continue;
     const uint8_t txSeq = sequence;
-    const uint8_t* b = gWatchNetworkTxDrainScratch->bytes;
-    const size_t n = gWatchNetworkTxDrainScratch->length;
-    Serial.printf("WATCH_RETURN_DRAIN len=%u q_left=%u\n",
-                  static_cast<unsigned>(n),
-                  static_cast<unsigned>(uxQueueMessagesWaiting(gWatchNetworkTxQueue)));
+    const uint8_t* b = pkt->bytes;
+    const size_t n = pkt->length;
     gRawCommandPayloadScratch[0] = 7;
     gRawCommandPayloadScratch[1] = 1;
     memcpy(gRawCommandPayloadScratch + 2, b, n);
-    if (!writeSppV2Frame(3, sequence++, gRawCommandPayloadScratch, n + 2)) {
+    bool ok = false;
+    for (int retry = 0; retry < 3; ++retry) {
+      if (writeSppV2Frame(3, sequence, gRawCommandPayloadScratch, n + 2)) {
+        ok = true;
+        sequence++;
+        break;
+      }
+      delay(4);
+    }
+    free(pkt);
+    if (!ok) {
       ++gWatchNetworkDroppedPackets;
       Serial.printf("WATCH_RETURN_DROP stage=spp_write seq=%u len=%u total_drop=%lu\n",
                     static_cast<unsigned>(txSeq), static_cast<unsigned>(n),
                     static_cast<unsigned long>(gWatchNetworkDroppedPackets));
       break;
     }
-    Serial.printf("WATCH_RETURN_SPP_SENT seq=%u len=%u\n",
-                  static_cast<unsigned>(txSeq), static_cast<unsigned>(n));
   }
 }
 
@@ -1594,7 +1642,12 @@ bool readSppV2Frame(SppV2Frame& output, uint32_t timeoutMs) {
         if (buffer[0] == 0xa5 && buffer[1] == 0xa5 && payloadLength <= kSppV2PayloadMax && gSppRxBuffered >= payloadLength + 8) break;
       }
     }
-    if (!received) delay(2);
+    if (!received) {
+      if (gWatchNetworkTxQueue && uxQueueMessagesWaiting(gWatchNetworkTxQueue) > 0) {
+        break;
+      }
+      delay(2);
+    }
   }
   if (gSppRxBuffered > 0) ++gSppRxPartialTimeouts;
   return false;
@@ -3877,6 +3930,11 @@ void authenticateWatchSpp(String target, String secretText) {
         // points at STA before forwarding watch packets.
         serviceWatchInternetUplink();
         drainWatchNetworkTx(outgoingSequence);
+        static uint32_t sLastLinkPolicyRefreshMs = 0;
+        if (millis() - sLastLinkPolicyRefreshMs >= 2000) {
+          sLastLinkPolicyRefreshMs = millis();
+          enforceActiveBluetoothLinkPolicy(address);
+        }
       }
 
       if (r4GateActive &&
@@ -3912,8 +3970,8 @@ void authenticateWatchSpp(String target, String secretText) {
         }
       }
 
-      // Never let a 250 ms read timeout destroy the Round-4 deadlines.
-      const uint32_t sppReadTimeoutMs = r4GateActive ? 2u : 250u;
+      // Keep polling responsive to prevent return queue drops.
+      const uint32_t sppReadTimeoutMs = r4GateActive ? 2u : 20u;
       if (!readSppV2Frame(frame, sppReadTimeoutMs)) {
         delay(2);
         continue;
@@ -4110,6 +4168,7 @@ void authenticateWatchSpp(String target, String secretText) {
                   static_cast<unsigned long>(r4SlowAckCount));
   } while (false);
   watchBt.disconnect(); watchBt.end();
+  resetWatchNetworkSessionQueue();
   gWatchRawTraceEnabled = false;
   mbedtls_platform_zeroize(secret, sizeof(secret)); mbedtls_platform_zeroize(phoneNonce, sizeof(phoneNonce)); mbedtls_platform_zeroize(step3, sizeof(step3));
   mbedtls_platform_zeroize(encKey, sizeof(encKey)); mbedtls_platform_zeroize(decKey, sizeof(decKey));
